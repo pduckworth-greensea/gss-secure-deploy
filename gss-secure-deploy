@@ -5,6 +5,7 @@ VERSION="0.1.0"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/deploy.sh"
+source "${SCRIPT_DIR}/lib/ansible.sh"
 
 # Color codes for error messages
 RED='\033[0;31m'
@@ -292,7 +293,16 @@ main() {
   gum style --foreground 45 "Starting deployment (this may take 15-30 minutes)..."
   echo ""
   deploy_run
-  
+
+  # TPM Binding
+  gum style --foreground 45 "Binding LUKS to TPM for auto-unlock..."
+  if ansible_bind_tpm "${hostname}" "/dev/sda3" "${luks_pass}"; then
+      gum style --foreground 46 "✓ TPM binding complete"
+  else
+      gum style --foreground 196 "⚠ TPM binding failed - manual LUKS unlock required"
+  fi
+  echo ""
+
   # Save credentials
   local creds_file
   creds_file=$(save_credentials "${hostname}" "${username}" "${password}" "${luks_pass}")

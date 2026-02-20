@@ -1,0 +1,151 @@
+---
+- name: "Bind LUKS to TPM2 via Clevis"
+  hosts: "{{ target_host | default('luks-test-vm') }}"
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # PCR configuration based on hardware type
+    # VMs (kvm/qemu): Use PCR 7 (Secure Boot state) - more stable than PCR 1
+    # Physical (ThinkPads): Use PCR 7 only - stable across reboots, changes on dbx/Secure Boot updates
+    # 
+    # PCR Reference:
+    #   PCR 0: Firmware code (changes on firmware update)
+    #   PCR 1: Firmware config (too sensitive - changes on BIOS settings, boot order)
+    #   PCR 7: Secure Boot policy (stable, changes on db/dbx/MOK updates)
+    #   PCR 4/5: Bootloader (changes on grub/shim updates)
+    #
+    # For maximum reliability, we use PCR 7 for both VM and physical
+    # For physical ThinkPads, PCR 7 ensures Secure Boot policy hasn't changed
+    
+    vm_pcr_ids: "7"           # VM: Secure Boot state only
+    physical_pcr_ids: "7"     # Physical: Secure Boot state only (can add 4,5 for tighter binding)
+    
+  tasks:
+    - name: Verify SSH connectivity
+      ping:
+
+    - name: Detect virtualization type
+      command: systemd-detect-virt
+      register: virt_detect
+      changed_when: false
+      failed_when: false
+
+    - name: Set is_virtual fact
+      set_fact:
+        is_virtual: "{{ virt_detect.stdout in ['kvm', 'qemu', 'vmware', 'xen', 'hyperv', 'virtualbox'] }}"
+        detected_virt: "{{ virt_detect.stdout }}"
+
+    - name: Set PCR IDs based on hardware type
+      set_fact:
+        effective_pcr_ids: "{{ vm_pcr_ids if is_virtual else physical_pcr_ids }}"
+
+    - name: Display hardware detection
+      debug:
+        msg: |
+          Virtualization: {{ detected_virt }}
+          Is Virtual: {{ is_virtual }}
+          Using PCR IDs: {{ effective_pcr_ids }}
+
+    - name: Verify LUKS is active
+      shell: "lsblk -o NAME,TYPE | grep crypt"
+      register: crypt_check
+      changed_when: false
+
+    - name: Display LUKS status
+      debug:
+        var: crypt_check.stdout_lines
+
+    - name: Fail if LUKS is not active
+      fail:
+        msg: "LUKS encryption not detected. Run luks-encrypt.yml first."
+      when: crypt_check.rc != 0
+
+    - name: Verify TPM2 device exists
+      stat:
+        path: /dev/tpmrm0
+      register: tpm_check
+
+    - name: Fail if TPM2 not available
+      fail:
+        msg: "TPM2 device /dev/tpmrm0 not found"
+      when: not tpm_check.stat.exists
+
+    - name: Install clevis packages
+      apt:
+        name:
+          - clevis
+          - clevis-luks
+          - clevis-tpm2
+          - clevis-initramfs
+          - tpm2-tools
+        state: present
+        update_cache: yes
+      register: clevis_install
+
+    - name: Display install result
+      debug:
+        msg: "Clevis packages installed: {{ clevis_install.changed }}"
+
+    - name: Check if LUKS already has a clevis binding
+      command: "clevis luks list -d {{ luks_device }}"
+      register: clevis_list
+      failed_when: false
+      changed_when: false
+
+    - name: Display existing bindings
+      debug:
+        var: clevis_list.stdout_lines
+
+    - name: Bind LUKS to TPM2
+      shell: |
+        echo "{{ luks_passphrase }}" | clevis luks bind -f -d {{ luks_device }} tpm2 \
+          '{"pcr_bank":"{{ clevis_pcr_bank }}","pcr_ids":"{{ effective_pcr_ids }}"}'
+      register: clevis_bind
+      no_log: true
+      failed_when: clevis_bind.rc != 0 and "Error" in clevis_bind.stderr
+      when: clevis_list.stdout == "" or "tpm2" not in clevis_list.stdout
+
+    - name: Display bind result
+      debug:
+        msg: "Clevis bind completed with rc={{ clevis_bind.rc | default('skipped - already bound') }}"
+
+    - name: Verify binding
+      command: "clevis luks list -d {{ luks_device }}"
+      register: clevis_verify
+      changed_when: false
+
+    - name: Display verified binding
+      debug:
+        var: clevis_verify.stdout_lines
+
+    - name: Rebuild initramfs with clevis support
+      command: update-initramfs -u -k all
+      register: initramfs_update
+
+    - name: Verify clevis in initramfs
+      shell: "lsinitramfs /boot/initrd.img-$(uname -r) | grep clevis | head -10"
+      register: initramfs_clevis
+      changed_when: false
+      failed_when: false
+
+    - name: Display initramfs clevis check
+      debug:
+        var: initramfs_clevis.stdout_lines
+
+    - name: Completion message
+      debug:
+        msg: |
+          ========================================
+          CLEVIS TPM2 BINDING COMPLETE
+          ========================================
+          Device: {{ luks_device }}
+          Hardware: {{ 'Virtual (' + detected_virt + ')' if is_virtual else 'Physical' }}
+          PCR bank: {{ clevis_pcr_bank }}
+          PCR IDs: {{ effective_pcr_ids }}
+
+          NEXT STEPS:
+          1. Reboot the machine
+          2. It should auto-unlock via TPM2 (no passphrase prompt)
+          3. If it fails, enter passphrase manually and debug
+          ========================================
