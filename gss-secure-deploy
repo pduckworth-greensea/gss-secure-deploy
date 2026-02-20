@@ -3,15 +3,302 @@ set -euo pipefail
 
 VERSION="0.1.0"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/deploy.sh"
+
+# Color codes for error messages
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
 show_help() {
   cat <<EOF
 gss-secure-deploy v${VERSION}
 
 Interactive wizard for deploying LUKS-encrypted developer workstations.
 
-Usage: gss-secure-deploy
+Usage: gss-secure-deploy [OPTIONS]
+
+Options:
+  --help, -h       Show this help message
+  --version, -v    Show version
+
+The wizard will guide you through:
+  1. Selecting a machine from MAAS
+  2. Entering deployment credentials
+  3. Confirming deployment details
+  4. Running the deployment
+
+Requirements:
+  - gum (charmbracelet/gum) must be installed
+  - maas CLI must be configured
+  - SSH key for MAAS server must be available
 
 EOF
+}
+
+check_dependencies() {
+  local missing=()
+  
+  if ! command -v gum &> /dev/null; then
+    missing+=("gum (charmbracelet/gum)")
+  fi
+  
+  if ! command -v maas &> /dev/null; then
+    missing+=("maas CLI")
+  fi
+  
+  if ! command -v jq &> /dev/null; then
+    missing+=("jq")
+  fi
+  
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    gum style --foreground 196 "Error: Missing required dependencies:"
+    for dep in "${missing[@]}"; do
+      gum style --foreground 196 "  - $dep"
+    done
+    exit 1
+  fi
+}
+
+check_maas_connectivity() {
+  if ! ssh_maas "test -d ${PRESEED_DIR}" >/dev/null 2>&1; then
+    gum style --foreground 196 "Error: Unable to reach MAAS server or access ${PRESEED_DIR}"
+    exit 1
+  fi
+}
+
+get_machines_list() {
+  local machines_json
+  machines_json=$(maas "${MAAS_PROFILE}" machines read 2>/dev/null || echo "[]")
+  
+  if [[ "${machines_json}" == "[]" ]]; then
+    gum style --foreground 196 "Error: No machines found in MAAS or unable to connect"
+    exit 1
+  fi
+  
+  echo "${machines_json}" | jq -r '.[] | "\(.hostname // "unnamed") (\(.system_id))"' | sort
+}
+
+validate_username() {
+  local username="$1"
+  
+  # Username: lowercase, alphanumeric + underscore/dash, 3-32 chars
+  if ! [[ "${username}" =~ ^[a-z][a-z0-9_-]{2,31}$ ]]; then
+    return 1
+  fi
+  return 0
+}
+
+validate_password() {
+  local password="$1"
+  
+  # Minimum 8 characters
+  if [[ ${#password} -lt 8 ]]; then
+    return 1
+  fi
+  return 0
+}
+
+validate_luks_passphrase() {
+  local passphrase="$1"
+  
+  # Minimum 8 characters
+  if [[ ${#passphrase} -lt 8 ]]; then
+    return 1
+  fi
+  return 0
+}
+
+get_machine_selection() {
+  local machines_list
+  machines_list=$(get_machines_list)
+  
+  if [[ -z "${machines_list}" ]]; then
+    gum style --foreground 196 "Error: No machines available"
+    exit 1
+  fi
+  
+  echo "${machines_list}" | gum filter --placeholder "Select a machine to deploy..."
+}
+
+get_username() {
+  local username
+  
+  while true; do
+    username=$(gum input --placeholder "Enter username (e.g., jdoe, 3-32 chars, lowercase alphanumeric + _ -)")
+    
+    if [[ -z "${username}" ]]; then
+      gum style --foreground 196 "Error: Username cannot be empty"
+      continue
+    fi
+    
+    if ! validate_username "${username}"; then
+      gum style --foreground 196 "Error: Username must be 3-32 chars, start with letter, contain only lowercase alphanumeric, underscore, or dash"
+      continue
+    fi
+    
+    echo "${username}"
+    break
+  done
+}
+
+get_password() {
+  local password
+  
+  while true; do
+    password=$(gum input --password --placeholder "Enter user password (minimum 8 characters)")
+    
+    if [[ -z "${password}" ]]; then
+      gum style --foreground 196 "Error: Password cannot be empty"
+      continue
+    fi
+    
+    if ! validate_password "${password}"; then
+      gum style --foreground 196 "Error: Password must be at least 8 characters"
+      continue
+    fi
+    
+    echo "${password}"
+    break
+  done
+}
+
+get_luks_passphrase() {
+  local passphrase
+  
+  while true; do
+    passphrase=$(gum input --password --placeholder "Enter LUKS passphrase (minimum 8 characters)")
+    
+    if [[ -z "${passphrase}" ]]; then
+      gum style --foreground 196 "Error: LUKS passphrase cannot be empty"
+      continue
+    fi
+    
+    if ! validate_luks_passphrase "${passphrase}"; then
+      gum style --foreground 196 "Error: LUKS passphrase must be at least 8 characters"
+      continue
+    fi
+    
+    echo "${passphrase}"
+    break
+  done
+}
+
+show_summary() {
+  local hostname="$1"
+  local system_id="$2"
+  local username="$3"
+  
+  gum style --border rounded --padding "1 2" --foreground 46 \
+"Deployment Summary
+
+Machine: ${hostname}
+System ID: ${system_id}
+Username: ${username}
+Password: [REDACTED]
+LUKS Passphrase: [REDACTED]"
+}
+
+save_credentials() {
+  local hostname="$1"
+  local username="$2"
+  local password="$3"
+  local luks_pass="$4"
+  
+  local creds_dir="${HOME}/.gss-secure-deploy/credentials"
+  mkdir -p "${creds_dir}"
+  
+  local creds_file="${creds_dir}/${hostname}.txt"
+  
+  cat > "${creds_file}" <<EOF
+Machine: ${hostname}
+Username: ${username}
+Password: ${password}
+LUKS Passphrase: ${luks_pass}
+Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+EOF
+  
+  chmod 600 "${creds_file}"
+  echo "${creds_file}"
+}
+
+main() {
+  gum style --foreground 45 "gss-secure-deploy v${VERSION}"
+  gum style --foreground 45 "Interactive LUKS deployment wizard"
+  echo ""
+  
+  # Check dependencies
+  check_dependencies
+  
+  # Check MAAS connectivity
+  gum style --foreground 45 "Checking MAAS connectivity..."
+  check_maas_connectivity
+  gum style --foreground 46 "✓ MAAS connectivity verified"
+  
+  # Get machine selection
+  gum style --foreground 45 "Step 1: Select Machine"
+  local selected_machine
+  selected_machine=$(get_machine_selection)
+  
+  if [[ -z "${selected_machine}" ]]; then
+    gum style --foreground 196 "Error: No machine selected"
+    exit 1
+  fi
+  
+  local hostname
+  local system_id
+  hostname=$(echo "${selected_machine}" | awk '{print $1}')
+  system_id=$(echo "${selected_machine}" | grep -oP '\([^\)]+\)' | tr -d '()')
+  
+  gum style --foreground 46 "✓ Selected: ${hostname} (${system_id})"
+  echo ""
+  
+  # Get credentials
+  gum style --foreground 45 "Step 2: Enter Credentials"
+  local username
+  username=$(get_username)
+  gum style --foreground 46 "✓ Username: ${username}"
+  
+  local password
+  password=$(get_password)
+  gum style --foreground 46 "✓ Password: [REDACTED]"
+  
+  local luks_pass
+  luks_pass=$(get_luks_passphrase)
+  gum style --foreground 46 "✓ LUKS Passphrase: [REDACTED]"
+  echo ""
+  
+  # Show summary
+  gum style --foreground 45 "Step 3: Review Summary"
+  show_summary "${hostname}" "${system_id}" "${username}"
+  echo ""
+  
+  # Confirm deployment
+  gum style --foreground 45 "Step 4: Confirm Deployment"
+  if ! gum confirm "Proceed with deployment?"; then
+    gum style --foreground 196 "Deployment cancelled"
+    exit 0
+  fi
+  
+  # Initialize deployment
+  gum style --foreground 45 "Initializing deployment..."
+  deploy_init "${system_id}" "${hostname}" "${username}" "${password}"
+  gum style --foreground 46 "✓ Deployment initialized"
+  
+  # Run deployment with progress
+  export LUKS_PASSPHRASE="${luks_pass}"
+  gum style --foreground 45 "Starting deployment (this may take 15-30 minutes)..."
+  echo ""
+  deploy_run
+  
+  # Save credentials
+  local creds_file
+  creds_file=$(save_credentials "${hostname}" "${username}" "${password}" "${luks_pass}")
+  
+  gum style --foreground 46 "✓ Deployment complete!"
+  gum style --foreground 46 "Credentials saved to: ${creds_file}"
 }
 
 if [[ "${1:-}" == "--version" ]] || [[ "${1:-}" == "-v" ]]; then
@@ -24,6 +311,4 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
-echo "gss-secure-deploy v${VERSION}"
-echo "Wizard interface coming soon..."
-exit 0
+main "$@"

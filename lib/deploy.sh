@@ -118,7 +118,7 @@ wait_for_vm_stopped() {
 
     while [[ $attempt -lt $max_attempts ]]; do
         local status
-        status=$(ssh "${host}" qm status "${vmid}" 2>/dev/null | awk -F': ' '{print $2}')
+        status=$(ssh "${host}" -- qm status "${vmid}" 2>/dev/null | awk -F': ' '{print $2}')
         if [[ "${status}" == "stopped" ]]; then
             return 0
         fi
@@ -232,7 +232,8 @@ deploy_hydrate() {
     sleep 5
 
     log "Forcing VM power off and verifying stopped..."
-    ssh "${PROXMOX_HOST}" qm stop "${PROXMOX_VMID}" > /dev/null 2>&1 || true
+    local proxmox_vmid="${PROXMOX_VMID}"
+    ssh "${PROXMOX_HOST}" -- qm stop "${proxmox_vmid}" > /dev/null 2>&1 || true
     if ! wait_for_vm_stopped "${PROXMOX_HOST}" "${PROXMOX_VMID}" 30; then
         error "Timeout waiting for VM ${PROXMOX_VMID} to stop"
     fi
