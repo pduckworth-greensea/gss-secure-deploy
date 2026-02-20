@@ -283,12 +283,12 @@ main() {
   fi
   
   # Initialize deployment
+  export LUKS_PASSPHRASE="${luks_pass}"
   gum style --foreground 45 "Initializing deployment..."
   deploy_init "${system_id}" "${hostname}" "${username}" "${password}"
   gum style --foreground 46 "✓ Deployment initialized"
   
   # Run deployment with progress
-  export LUKS_PASSPHRASE="${luks_pass}"
   gum style --foreground 45 "Starting deployment (this may take 15-30 minutes)..."
   echo ""
   deploy_run
