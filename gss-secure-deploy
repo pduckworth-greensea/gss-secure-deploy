@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+
+show_help() {
+  cat <<EOF
+gss-secure-deploy v${VERSION}
+
+Interactive wizard for deploying LUKS-encrypted developer workstations.
+
+Usage: gss-secure-deploy
+
+EOF
+}
+
+if [[ "${1:-}" == "--version" ]] || [[ "${1:-}" == "-v" ]]; then
+  echo "gss-secure-deploy v${VERSION}"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+  show_help
+  exit 0
+fi
+
+echo "gss-secure-deploy v${VERSION}"
+echo "Wizard interface coming soon..."
+exit 0
