@@ -1,0 +1,134 @@
+#cloud-config
+debconf_selections:
+ maas: |
+  {{for line in str(curtin_preseed).splitlines()}}
+  {{line}}
+  {{endfor}}
+early_commands:
+  driver_00:
+  - sh
+  - -c
+  - echo third party drivers not installed or necessary.
+install:
+  error_tarfile: /tmp/curtin-logs.tar
+  log_file: /tmp/install.log
+  post_files:
+  - /tmp/install.log
+  - /tmp/curtin-logs.tar
+kernel:
+  mapping: {}
+  package: linux-generic
+kernel-crash-dumps:
+  enabled: false
+late_commands:
+  maas: [wget, '--no-proxy', {{node_disable_pxe_url|escape.json}}, '--post-data', {{node_disable_pxe_data|escape.json}}, '-O', '/dev/null']
+  00_setup_luks_keyfile:
+  - curtin
+  - in-target
+  - --
+  - sh
+  - -c
+  - echo 'Parrot4-Frostbite' > /root/luks-key && chmod 600 /root/luks-key
+  01_curtin_crypttab:
+  - curtin
+  - in-target
+  - --
+  - sh
+  - -c
+  - echo 'sda-part3_crypt UUID=$(blkid -s UUID -o value /dev/sda3) /root/luks-key luks,discard' >> /etc/crypttab
+  02_add_keyfile_to_initramfs:
+  - curtin
+  - in-target
+  - --
+  - sh
+  - -c
+  - echo 'KEYFILE_PATTERN=/root/luks-key' >> /etc/cryptsetup-initramfs/conf-hook && echo 'UMASK=0077' >> /etc/initramfs-tools/initramfs.conf
+  03_update_initramfs:
+  - curtin
+  - in-target
+  - --
+  - update-initramfs
+  - -u
+  - -k
+  - all
+  04_update_grub:
+  - curtin
+  - in-target
+  - --
+  - update-grub
+network_commands:
+  builtin:
+  - curtin
+  - net-meta
+  - custom
+partitioning_commands:
+  builtin:
+  - curtin
+  - block-meta
+  - custom
+showtrace: true
+storage:
+  version: 1
+  config:
+  - id: sda
+    type: disk
+    ptable: gpt
+    grub_device: true
+    model: QEMU HARDDISK
+    serial: drive-scsi0
+    name: sda
+    wipe: superblock
+  - id: sda-part1
+    type: partition
+    device: sda
+    number: 1
+    size: 536870912B
+    offset: 4194304B
+    flag: boot
+    wipe: superblock
+  - id: sda-part2
+    type: partition
+    device: sda
+    number: 2
+    size: 2147483648B
+    wipe: superblock
+  - id: sda-part3
+    type: partition
+    device: sda
+    number: 3
+    size: 24150802432B
+    wipe: superblock
+  - id: sda-part3_crypt
+    type: dm_crypt
+    dm_name: sda-part3_crypt
+    volume: sda-part3
+    key: Parrot4-Frostbite
+    keysize: '512'
+  - id: sda-part1_format
+    type: format
+    fstype: fat32
+    label: efi
+    volume: sda-part1
+  - id: sda-part2_format
+    type: format
+    fstype: ext4
+    label: boot
+    volume: sda-part2
+  - id: sda-part3_format
+    type: format
+    fstype: ext4
+    label: root
+    volume: sda-part3_crypt
+  - id: sda-part3_mount
+    type: mount
+    path: /
+    device: sda-part3_format
+  - id: sda-part2_mount
+    type: mount
+    path: /boot
+    device: sda-part2_format
+  - id: sda-part1_mount
+    type: mount
+    path: /boot/efi
+    device: sda-part1_format
+verbosity: 3
